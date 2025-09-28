@@ -137,10 +137,10 @@ int Jim_RegexpCmd(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
     int eflags = 0;
     int option;
     enum {
-        OPT_INDICES,  OPT_NOCASE, OPT_LINE, OPT_ALL, OPT_INLINE, OPT_START, OPT_END
+        OPT_INDICES,  OPT_NOCASE, OPT_LINE, OPT_ALL, OPT_INLINE, OPT_START, OPT_EXPANDED, OPT_END
     };
     static const char * const options[] = {
-        "-indices", "-nocase", "-line", "-all", "-inline", "-start", "--", NULL
+        "-indices", "-nocase", "-line", "-all", "-inline", "-start", "-expanded", "--", NULL
     };
 
     for (i = 1; i < argc; i++) {
@@ -185,6 +185,15 @@ int Jim_RegexpCmd(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
                     return JIM_ERR;
                 }
                 break;
+
+            case OPT_EXPANDED:
+#ifdef REG_EXPANDED
+                regcomp_flags |= REG_EXPANDED;
+                break;
+#else
+                Jim_SetResultFormatted(interp, "not supported: %#s", argv[i]);
+                return JIM_ERR;
+#endif
         }
     }
     if (argc - i < 2) {
@@ -250,10 +259,11 @@ int Jim_RegexpCmd(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
 
     num_matches++;
 
-    if (opt_all && !opt_inline) {
-        /* Just count the number of matches, so skip the substitution h */
-        goto try_next_match;
-    }
+    /* We used to not assign vars for -all if not -inline, since we can't
+     * really assign capture groups for multiple matches, but Tcl does this,
+     * just setting the last value for each capture group, so we will do the
+     * same for compatibility
+     */
 
     /*
      * If additional variable names have been specified, return
@@ -261,7 +271,7 @@ int Jim_RegexpCmd(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
      */
 
     j = 0;
-    for (i += 2; opt_inline ? j < num_vars : i < argc; i++, j++) {
+    for (j = 0; j < num_vars; j++) {
         Jim_Obj *resultObj;
 
         if (opt_indices) {
@@ -295,7 +305,7 @@ int Jim_RegexpCmd(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
         }
         else {
             /* And now set the result variable */
-            result = Jim_SetVariable(interp, argv[i], resultObj);
+            result = Jim_SetVariable(interp, argv[i + 2 + j], resultObj);
 
             if (result != JIM_OK) {
                 Jim_FreeObj(interp, resultObj);
@@ -304,7 +314,6 @@ int Jim_RegexpCmd(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
         }
     }
 
-  try_next_match:
     if (opt_all && (pattern[0] != '^' || (regcomp_flags & REG_NEWLINE)) && *source_str) {
         if (pmatch[0].rm_eo) {
             offset += utf8_strlen(source_str, pmatch[0].rm_eo);
@@ -361,10 +370,10 @@ int Jim_RegsubCmd(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
     const char *pattern;
     int option;
     enum {
-        OPT_NOCASE, OPT_LINE, OPT_ALL, OPT_START, OPT_COMMAND, OPT_END
+        OPT_NOCASE, OPT_LINE, OPT_ALL, OPT_START, OPT_COMMAND, OPT_EXPANDED, OPT_END
     };
     static const char * const options[] = {
-        "-nocase", "-line", "-all", "-start", "-command", "--", NULL
+        "-nocase", "-line", "-all", "-start", "-command", "-expanded", "--", NULL
     };
 
     for (i = 1; i < argc; i++) {
@@ -405,6 +414,15 @@ int Jim_RegsubCmd(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
             case OPT_COMMAND:
                 opt_command = 1;
                 break;
+
+            case OPT_EXPANDED:
+#ifdef REG_EXPANDED
+                regcomp_flags |= REG_EXPANDED;
+                break;
+#else
+                Jim_SetResultFormatted(interp, "not supported: %#s", argv[i]);
+                return JIM_ERR;
+#endif
         }
     }
     if (argc - i != 3 && argc - i != 4) {

@@ -63,6 +63,10 @@ Changes since 0.83
 #. `vwait` now accepts a script argument
 #. Add support for `os.umask`
 #. Add `taint` support for improved data security
+#. Improved API for creating C commands with +'Jim_RegisterCommand'+ for arg checking and usage
+#. New `info usage` to return the usage for a proc or native command
+#. New `info aliases` to list all aliases
+#. `expr` supports new +'=*'+ and +'=~'+ matching operators (see <<_expressions,EXPRESSIONS>>)
 
 Changes between 0.82 and 0.83
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -878,6 +882,14 @@ of precedence:
 +eq ne+::
     String equal and not equal.  Uses the string value directly without
     attempting to convert to a number first.
+
++=*+::
+   String glob match. The left and side is the string to match and the right
+   and side is the pattern. See <<_string_matching,STRING MATCHING>>.
+
++=~+::
+   String regexp match. The left and side is the string to match and the right
+   and side is the regular expression. See <<_regular_expressions,REGULAR EXPRESSIONS>>.
 
 +in ni+::
     String in list and not in list. For 'in', result is 1 if the left operand (as a string)
@@ -2926,17 +2938,23 @@ The legal +'option'+'s (which may be abbreviated) are:
     +'command'+ must be an alias created with `alias`. In which case the target
     command and arguments, as passed to `alias` are returned. See `exists -alias`
 
++*info aliases ?-all?* ?'pattern'?+::
+    Returns a list of alias commands.
+    See `info commands` for the meaning of +*-all*+ and +'pattern'+.
+
 +*info body* 'procname'+::
     Returns the body of procedure +'procname'+.  +'procname'+ must be
     the name of a Tcl command procedure.
 
-+*info channels*+::
-    Returns a list of all open file handles from `open` or `socket`
++*info channels ?-all?* ?'pattern'?+::
+    Returns a list of open file handles from `open` or `socket`.
+    See `info commands` for the meaning of +*-all*+ and +'pattern'+.
 
 +*info commands ?-all?* ?'pattern'?+::
     If +'pattern'+ isn't specified, returns a list of names of all the
     Tcl commands, including both the built-in commands written in C and
-    the command procedures defined using the `proc` command.
+    the command procedures defined using the `proc` command (including aliases
+    and channels).
     If +'pattern'+ is specified, only those names matching +'pattern'+
     (using <<_string_matching,STRING MATCHING>> rules) are returned.
     Normally commands containing a space character are not returned.
@@ -3016,13 +3034,13 @@ The legal +'option'+'s (which may be abbreviated) are:
     was invoked. A full path will be returned, unless the path
     can't be determined, in which case the empty string will be returned.
 
++*info patchlevel*+::
+    Returns the build (git) version if available. Otherwise
+    returns the same as `info version`.
+
 +*info procs ?-all?* ?'pattern'?+::
-    If +'pattern'+ isn't specified, returns a list of all the
-    names of Tcl command procedures.
-    If +'pattern'+ is specified, only those names matching +'pattern'+
-    (using <<_string_matching,STRING MATCHING>> rules) are returned.
-    Normally commands containing a space character are not returned.
-    If +*-all*+ is given, the result does include these commands.
+    Returns a list containing the names of Tcl command procedures.
+    See `info commands` for the meaning of +*-all*+ and +'pattern'+.
 
 +*info references*+::
     Returns a list of all references which have not yet been garbage
@@ -3059,6 +3077,11 @@ The legal +'option'+'s (which may be abbreviated) are:
 
 +*info tainted* 'str'+::
     Returns 1 if the value is tainted, or 0 if not.
+
++*info usage* 'command'+::
+    Returns the usage for the given command. For Tcl command procedures, this is based
+    on the arguments defined for the procedure. For a C command, this is the command usage
+    that was specificied when the command was registered.
 
 +*info version*+::
     Returns the version number for this version of Jim in the form +*x.yy*+.
@@ -3153,6 +3176,63 @@ than variables, a list of unassigned elements is returned.
     3
     a=1,b=2
 ----
+
+lsubst
+~~~~
++*lsubst ?-line?* 'string'+
+
+This command is similar to `list` in that it creates a list, but uses
+the same rules as scripts when constructing the elements of the list.
+It is somewhat similar to `subst` except it produces a list instead of a string.
+
+This means that variables are substituted, commands are evaluated, backslashes are
+interpreted, the expansion operator is applied and comments are skipped.
+
+Consider the following example.
+
+---
+    set x 1
+    set y {2 3}
+    set z 3
+    lsubst {
+        # This is a list with interpolation
+        $x; # The x variable
+        {*}$y; # The y variable expanded
+        [string cat a b c]; # A command
+        {*}[list 4 5]; # A list expanded into multiple elements
+        "$z$z"; # A string with interpolation
+    }
+---
+
+The result of `lsubst` is the following list with 7 elements.
+
+---
+    1 2 3 abc 4 5 33
+---
+
+This is particularly useful when constructing a list (or dict)
+as a data structure as it easily allows for comments and variable and command
+substitution.
+
+Sometimes it is useful to return each "command" as a separate list rather than
+simply running all the words together. This can be accomplished with `lsubst -line`.
+
+Consider the following example.
+
+---
+    lsubst -line {
+        # two "lines" because of the semicolon
+        one a; two b
+        # one line with three elements
+        {*}{a b c}
+    }
+---
+
+The result of `lsubst -line` is the following list with 3 elements, one for each "command".
+
+---
+{one a} {two b} {a b c}
+---
 
 local
 ~~~~~
@@ -3825,7 +3905,7 @@ See `aio read`
 
 regexp
 ~~~~~~
-+*regexp ?-nocase? ?-line? ?-indices? ?-start* 'offset'? *?-all? ?-inline? ?--?* 'exp string ?matchVar? ?subMatchVar subMatchVar \...?'+
++*regexp ?-nocase? ?-line? ?-indices? ?-start* 'offset'? *?-all? ?-inline? ?-expanded? ?--?* 'exp string ?matchVar? ?subMatchVar subMatchVar \...?'+
 
 Determines whether the regular expression +'exp'+ matches part or
 all of +'string'+ and returns 1 if it does, 0 if it doesn't.
@@ -3898,13 +3978,17 @@ The following switches modify the behaviour of +'regexp'+
     data, plus one element for each subexpression in the regular
     expression.
 
++*-expanded*+::
+    Enables use of the expanded regular expression syntax where whitespace
+    and comments are ignored.
+
 +*--*+::
     Marks the end of switches. The argument following this one will be
     treated as +'exp'+ even if it starts with a +-+.
 
 regsub
 ~~~~~~
-+*regsub ?-nocase? ?-all? ?-line? ?-command? ?-start* 'offset'? ?*--*? 'exp string subSpec ?varName?'+
++*regsub ?-nocase? ?-all? ?-line? ?-command? ?-expanded? ?-start* 'offset'? ?*--*? 'exp string subSpec ?varName?'+
 
 This command matches the regular expression +'exp'+ against
 +'string'+ using the rules described in REGULAR EXPRESSIONS
@@ -3985,6 +4069,10 @@ The following switches modify the behaviour of +'regsub'+
     Specifies a character index offset into the string at which to
     start matching the regular expression. +'offset'+ will be
     constrained to the bounds of the input string.
+
++*-expanded*+::
+    Enables use of the expanded regular expression syntax where whitespace
+    and comments are ignored.
 
 +*--*+::
     Marks the end of switches. The argument following this one will be
