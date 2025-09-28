@@ -1167,21 +1167,24 @@ static const Jim_HashTableType JimAssocDataHashTableType = {
  * Stack - This is a simple generic stack implementation. It is used for
  * example in the 'expr' expression compiler.
  * ---------------------------------------------------------------------------*/
-void Jim_InitStack(Jim_Stack *stack)
+void Jim_StackInit(Jim_Stack *stack, void (*freefunc) (void *ptr))
 {
     stack->len = 0;
     stack->maxlen = 0;
     stack->vector = NULL;
+    stack->freefunc = freefunc;
 }
 
-void Jim_FreeStack(Jim_Stack *stack)
+void Jim_StackFree(Jim_Stack *stack)
 {
+    int i;
+
+    if (stack->freefunc) {
+        for (i = 0; i < stack->len; i++) {
+            stack->freefunc(stack->vector[i]);
+        }
+    }
     Jim_Free(stack->vector);
-}
-
-int Jim_StackLen(Jim_Stack *stack)
-{
-    return stack->len;
 }
 
 void Jim_StackPush(Jim_Stack *stack, void *element)
@@ -1202,21 +1205,6 @@ void *Jim_StackPop(Jim_Stack *stack)
         return NULL;
     stack->len--;
     return stack->vector[stack->len];
-}
-
-void *Jim_StackPeek(Jim_Stack *stack)
-{
-    if (stack->len == 0)
-        return NULL;
-    return stack->vector[stack->len - 1];
-}
-
-void Jim_FreeStackElements(Jim_Stack *stack, void (*freeFunc) (void *ptr))
-{
-    int i;
-
-    for (i = 0; i < stack->len; i++)
-        freeFunc(stack->vector[i]);
 }
 
 /* -----------------------------------------------------------------------------
@@ -5221,7 +5209,7 @@ static int JimDeleteLocalProcs(Jim_Interp *interp, Jim_Stack *localCommands)
             }
             Jim_DecrRefCount(interp, cmdNameObj);
         }
-        Jim_FreeStack(localCommands);
+        Jim_StackFree(localCommands);
         Jim_Free(localCommands);
     }
     return JIM_OK;
@@ -6065,12 +6053,12 @@ static void JimSetStackTrace(Jim_Interp *interp, Jim_Obj *stackTraceObj)
     Jim_IncrRefCount(stackTraceObj);
     Jim_DecrRefCount(interp, interp->stackTrace);
     interp->stackTrace = stackTraceObj;
-    interp->errorFlag = 1;
+    interp->hasErrorStackTrace = 1;
 }
 
 static void JimSetErrorStack(Jim_Interp *interp, ScriptObj *script)
 {
-    if (!interp->errorFlag) {
+    if (!interp->hasErrorStackTrace) {
         int i;
         Jim_Obj *stackTrace = Jim_NewListObj(interp, NULL, 0);
 
@@ -9756,7 +9744,7 @@ static struct ExprTree *ExprTreeCreateTree(Jim_Interp *interp, const ParseTokenL
     builder.nodes = Jim_Alloc(sizeof(struct JimExprNode) * (tokenlist->count - 1));
     memset(builder.nodes, 0, sizeof(struct JimExprNode) * (tokenlist->count - 1));
     builder.next = builder.nodes;
-    Jim_InitStack(&builder.stack);
+    Jim_StackInit(&builder.stack, NULL);
 
     rc = ExprTreeBuildTree(interp, &builder, 0, 0, 1);
 
@@ -9770,7 +9758,7 @@ static struct ExprTree *ExprTreeCreateTree(Jim_Interp *interp, const ParseTokenL
     }
 
     /* Free the stack used for the compilation. */
-    Jim_FreeStack(&builder.stack);
+    Jim_StackFree(&builder.stack);
 
     if (rc != JIM_OK) {
         ExprTreeFreeNodes(interp, builder.nodes, builder.next - builder.nodes);
@@ -11289,7 +11277,7 @@ int Jim_EvalObj(Jim_Interp *interp, Jim_Obj *scriptObjPtr)
     JimPushEvalFrame(interp, &frame, scriptObjPtr);
 
     /* Collect a new error stack trace if an error occurs */
-    interp->errorFlag = 0;
+    interp->hasErrorStackTrace = 0;
     argv = sargv;
 
     /* Execute every command sequentially until the end of the script
@@ -11728,51 +11716,38 @@ int Jim_EvalFileGlobal(Jim_Interp *interp, const char *filename)
  * Reads the text file contents into an object and returns with a zero ref count.
  * Returns NULL and sets an error if can't read the file.
  */
-static Jim_Obj *JimReadTextFile(Jim_Interp *interp, const char *filename)
-{
-    jim_stat_t sb;
-    int fd;
-    char *buf;
-    int readlen;
-
-    if (Jim_Stat(filename, &sb) == -1 || (fd = open(filename, O_RDONLY | O_TEXT, 0666)) < 0) {
-        Jim_SetResultFormatted(interp, "couldn't read file \"%s\": %s", filename, strerror(errno));
-        return NULL;
-    }
-    buf = Jim_Alloc(sb.st_size + 1);
-    readlen = read(fd, buf, sb.st_size);
-    close(fd);
-    if (readlen < 0) {
-        Jim_Free(buf);
-        Jim_SetResultFormatted(interp, "failed to load file \"%s\": %s", filename, strerror(errno));
-        return NULL;
-    }
-    else {
-        Jim_Obj *objPtr;
-        buf[readlen] = 0;
-
-        objPtr = Jim_NewStringObjNoAlloc(interp, buf, readlen);
-
-        return objPtr;
-    }
-}
-
-
 int Jim_EvalFile(Jim_Interp *interp, const char *filename)
 {
-    Jim_Obj *filenameObj;
-    Jim_Obj *oldFilenameObj;
+    FILE *fp;
+    char *buf;
     Jim_Obj *scriptObjPtr;
-    int retcode;
+    Jim_Obj *filenameObj, *oldFilenameObj;
+    int retcode = JIM_ERR;
+    int readlen;
+#define READ_BUF_SIZE 256
 
-    scriptObjPtr = JimReadTextFile(interp, filename);
-    if (!scriptObjPtr) {
+   if ((fp = fopen(filename, "rt")) == NULL) {
+        Jim_SetResultFormatted(interp, "couldn't read file \"%s\": %s", filename, strerror(errno));
         return JIM_ERR;
     }
+    scriptObjPtr = Jim_NewStringObj(interp, NULL, 0);
 
+    buf = Jim_Alloc(READ_BUF_SIZE);
+    while ((readlen = fread(buf, 1, READ_BUF_SIZE, fp)) > 0) {
+        Jim_AppendString(interp, scriptObjPtr, buf, readlen);
+    }
+    Jim_Free(buf);
+    if (ferror(fp)) {
+        fclose(fp);
+        Jim_SetResultFormatted(interp, "failed to load file \"%s\": %s", filename, strerror(errno));
+        Jim_FreeNewObj(interp, scriptObjPtr);
+        return retcode;
+    }
+    fclose(fp);
+
+    /* Convert the stringObjType to a sourceObjType with filename and line */
     filenameObj = Jim_NewStringObj(interp, filename, -1);
     Jim_SetSourceInfo(interp, scriptObjPtr, filenameObj, 1);
-
     oldFilenameObj = JimPushInterpObj(interp->currentFilenameObj, filenameObj);
 
     retcode = Jim_EvalObj(interp, scriptObjPtr);
@@ -14190,7 +14165,7 @@ static int Jim_LocalCoreCommand(Jim_Interp *interp, int argc, Jim_Obj *const *ar
         }
         if (interp->framePtr->localCommands == NULL) {
             interp->framePtr->localCommands = Jim_Alloc(sizeof(*interp->framePtr->localCommands));
-            Jim_InitStack(interp->framePtr->localCommands);
+            Jim_StackInit(interp->framePtr->localCommands, NULL);
         }
         Jim_IncrRefCount(cmdNameObj);
         Jim_StackPush(interp->framePtr->localCommands, cmdNameObj);
@@ -14985,7 +14960,7 @@ wrongargs:
     else {
         exitCode = Jim_EvalObj(interp, argv[idx]);
         /* Once caught, a new error will set a stack trace again */
-        interp->errorFlag = 0;
+        interp->hasErrorStackTrace = 0;
     }
     interp->signal_level -= sig;
 
