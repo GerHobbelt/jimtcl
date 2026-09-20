@@ -4220,6 +4220,11 @@ static int JimCreateProcedureStatics(Jim_Interp *interp, Jim_Cmd *cmdPtr, Jim_Ob
                     }
                     else {
                         initObjPtr = Jim_GetVariable(interp, nameObjPtr, JIM_NONE);
+                        if (!initObjPtr) {
+                            Jim_SetResultFormatted(interp, "Could not resolve upvar \"%#s\"'s value", nameObjPtr);
+                            Jim_DecrRefCount(interp, nameObjPtr);
+                            return JIM_ERR;
+                        }
                     }
                     break;
 
@@ -8212,6 +8217,9 @@ static int SetIndexFromAny(Jim_Interp *interp, Jim_Obj *objPtr)
     }
     else if (idx < 0) {
         idx = -INT_MAX;
+    }
+    else if (idx > INT_MAX) {
+        goto badindex;
     }
 
     /* Free the old internal repr and set the new one. */
